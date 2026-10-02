@@ -1,0 +1,11 @@
+# Compaction fix bundle for DeepSeek Harness: prevents premature compaction
+# on small/medium context routes by tuning headroomTokens to 8192.
+# Addresses https://github.com/deepseek-ai/deepseek-harness/discussions/8088.
+
+- insert:
+    - id: compact-fix
+      name: 'dsh-compact-fix'
+- id: compaction-basic
+  config:
+    headroomTokens: 8192
+    maxTokens: 8192
