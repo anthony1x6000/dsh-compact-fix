@@ -1,6 +1,6 @@
 {
   "name": "dsh-compact-fix",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Prevent premature compaction in DeepSeek Harness by tuning headroomTokens (#8088)",
   "keywords": [
     "deepseek-harness",

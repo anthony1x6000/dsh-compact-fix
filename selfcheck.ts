@@ -5,15 +5,18 @@ import assert from 'node:assert'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  apply,
   COMPACTION_PLUGIN_ID,
   COMPACTION_PLUGIN_NAME,
   DEFAULT_HEADROOM_TOKENS,
   DEFAULT_MAX_TOKENS,
+  isCompactionEngine,
   name,
   patchEnginePrototype,
   patchPluginEntries,
   patchPresetRegistry,
   resolveOptions,
+  scanAndPatchRegistry,
 } from './index.ts'
 
 // 1. Config resolution tests
@@ -144,7 +147,69 @@ import {
   assert.strictEqual((newDef.plugins[0] as any).config.headroomTokens, 8192)
 }
 
-// 5. Packaging and Manifest assertions
+// 5. Registry discovery and the apply() crash regression
+{
+  // A compaction engine is recognised structurally, by the method the loader
+  // will call, not by the name its class happens to carry.
+  class FreshEngine {
+    config: any
+    constructor(config: any) {
+      this.config = config
+    }
+    async compactIfNeeded(_agent: any, _trigger: any, _signal: any) {
+      return this.config
+    }
+  }
+  assert.strictEqual(isCompactionEngine(FreshEngine), true, 'engine detected by compactIfNeeded')
+  assert.strictEqual(isCompactionEngine(class Plain {}), false, 'plain class is not an engine')
+  assert.strictEqual(isCompactionEngine({}), false, 'object is not an engine')
+  assert.strictEqual(isCompactionEngine(undefined), false, 'undefined is not an engine')
+
+  // `ctx.registry` is root-scoped, so preset-isolated engines are reachable.
+  const patchedCount = scanAndPatchRegistry(
+    { registry: { entries: () => [[FreshEngine, {}], [class Other {}, {}]] } } as any,
+    8192,
+    8192,
+  )
+  assert.strictEqual(patchedCount, 1, 'must patch exactly the engine class')
+  const discovered = await new FreshEngine({ headroomTokens: 65536, maxTokens: 65536 })
+    .compactIfNeeded({}, 'pressure', {})
+  assert.strictEqual(discovered.headroomTokens, 8192, 'registry-discovered engine must be corrected')
+
+  // Regression: the shipped 0.1.0 build probed `ctx.agentPresets`, which the
+  // Cordis property proxy rejects with "cannot get property ... without inject".
+  // The throw aborted apply(), so no layer of the fix ever ran.
+  const seen: string[] = []
+  const proxied = new Proxy(
+    {
+      logger: { info: (message: string) => seen.push(message) },
+      registry: { entries: () => [] as [unknown, unknown][] },
+      get: (serviceName: string) => {
+        if (serviceName === 'agentPresets') {
+          return { definitions: new Map(), register: () => undefined }
+        }
+        return undefined
+      },
+      inject: () => undefined,
+      on: () => undefined,
+    },
+    {
+      get(target: any, prop: string | symbol) {
+        if (prop in target) return target[prop as string]
+        throw new Error(`cannot get property "${String(prop)}" without inject`)
+      },
+    },
+  )
+
+  assert.doesNotThrow(
+    () => apply(proxied as any, {}),
+    'apply() must not probe undeclared services through the property proxy',
+  )
+  assert.strictEqual(seen.length, 1, 'apply() must report what it patched')
+  assert(seen[0].includes('headroomTokens=8192'), 'diagnostic must name the enforced headroom')
+}
+
+// 6. Packaging and Manifest assertions
 {
   const manifest = JSON.parse(readFileSync(join(import.meta.dirname, 'package.json'), 'utf8')) as {
     name: string
